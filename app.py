@@ -46,8 +46,6 @@ try:
         can_sync_shopify,
         fetch_markets,
         get_shopify_credentials,
-        get_max_refresh_range_days,
-        get_sync_days,
         get_sync_interval_seconds,
         sync_last_n_days,
         sync_shopify_range,
@@ -71,8 +69,6 @@ except ModuleNotFoundError:
         can_sync_shopify,
         fetch_markets,
         get_shopify_credentials,
-        get_max_refresh_range_days,
-        get_sync_days,
         get_sync_interval_seconds,
         sync_last_n_days,
         sync_shopify_range,
@@ -449,7 +445,6 @@ def create_app() -> Flask:
                 "status": "healthy",
                 "shopify": {
                     "credentials_configured": can_sync_shopify(),
-                    "sync_days": get_sync_days(),
                     "sync_interval_seconds": get_sync_interval_seconds(),
                 },
             }
@@ -530,16 +525,10 @@ def create_app() -> Flask:
         refresh = request.args.get("refresh") in ("1", "true", "yes")
 
         if refresh and can_sync_shopify() and start and end:
-            # Refresh the selected range (bounded to avoid huge backfills).
-            max_days = get_max_refresh_range_days()
+            # Refresh exactly the date range selected in the dashboard.
             today = date.today()
             req_end = min(end, today)
             req_start = min(start, req_end)
-
-            # Bound range length to max_days (keep the most recent portion of the selection).
-            # Inclusive day count: (end-start)+1
-            if (req_end - req_start).days + 1 > max_days:
-                req_start = req_end.fromordinal(req_end.toordinal() - (max_days - 1))
 
             if req_start <= req_end:
                 try:
@@ -794,13 +783,9 @@ def create_app() -> Flask:
         refresh = request.args.get("refresh") in ("1", "true", "yes")
 
         if refresh and can_sync_shopify() and start and end:
-            max_days = get_max_refresh_range_days()
             today = date.today()
             req_end = min(end, today)
             req_start = min(start, req_end)
-
-            if (req_end - req_start).days + 1 > max_days:
-                req_start = req_end.fromordinal(req_end.toordinal() - (max_days - 1))
 
             if req_start <= req_end:
                 try:
@@ -866,12 +851,9 @@ def create_app() -> Flask:
         refresh = request.args.get("refresh") in ("1", "true", "yes")
 
         if refresh and can_sync_shopify() and start and end:
-            max_days = get_max_refresh_range_days()
             today = date.today()
             req_end = min(end, today)
             req_start = min(start, req_end)
-            if (req_end - req_start).days + 1 > max_days:
-                req_start = req_end.fromordinal(req_end.toordinal() - (max_days - 1))
             if req_start <= req_end:
                 try:
                     sync_shopify_range(app, start=req_start, end=req_end)
@@ -947,13 +929,9 @@ def create_app() -> Flask:
             return jsonify({"rows": []})
 
         if refresh and can_sync_shopify() and start and end:
-            max_days = get_max_refresh_range_days()
             today = date.today()
             req_end = min(end, today)
             req_start = min(start, req_end)
-
-            if (req_end - req_start).days + 1 > max_days:
-                req_start = req_end.fromordinal(req_end.toordinal() - (max_days - 1))
 
             if req_start <= req_end:
                 try:
@@ -1005,14 +983,9 @@ def create_app() -> Flask:
         if not start or not end:
             return jsonify({"ok": False, "error": "Missing start or end"}), 400
 
-        max_days = get_max_refresh_range_days()
         today = date.today()
         req_end = min(end, today)
         req_start = min(start, req_end)
-
-        # Bound range length to max_days (keep the most recent portion of the selection).
-        if (req_end - req_start).days + 1 > max_days:
-            req_start = req_end.fromordinal(req_end.toordinal() - (max_days - 1))
 
         if req_start > req_end:
             return jsonify({"ok": True, "skipped": True, "reason": "Empty range"})
