@@ -92,20 +92,6 @@ def get_sync_days() -> int:
         return 10
 
 
-def get_max_refresh_range_days() -> int:
-    """Max days allowed to refresh on-demand via the dashboard date range.
-
-    Prevents accidental huge Shopify backfills from the UI.
-    """
-
-    try:
-        # Default to ~3 months to support longer custom ranges without requiring env changes.
-        # Still bounded to avoid accidental huge backfills from the UI.
-        return max(1, int(os.getenv("SHOPIFY_MAX_REFRESH_DAYS", "93")))
-    except ValueError:
-        return 93
-
-
 def get_sync_interval_seconds() -> int:
     try:
         return max(60, int(os.getenv("SHOPIFY_SYNC_INTERVAL_SECONDS", str(30 * 60))))
