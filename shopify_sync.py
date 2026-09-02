@@ -501,21 +501,23 @@ def fetch_orders_by(
                 break
         return fetched
 
-    orders = fetch_with_search(search)
-    if orders:
-        return orders
-
-    # Some Shopify stores return an empty result for a compound search containing
-    # status:any even though the order exists. Retry the same bounded date query
-    # without that qualifier before falling back to a recent local date filter.
-    bounded_search = f"{field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}"
-    orders = fetch_with_search(bounded_search)
-    if orders:
-        return orders
+    # Shopify treats completed orders as closed. Try the broad search first,
+    # then explicit open/closed searches so a fulfilled test order cannot be
+    # silently omitted by a store's search-index behaviour.
+    search_variants = [
+        search,
+        f"status:closed {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}",
+        f"status:open {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}",
+        f"{field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}",
+    ]
+    for search_variant in search_variants:
+        orders = fetch_with_search(search_variant)
+        if orders:
+            return orders
 
     # Last-resort compatibility path for stores whose date search index is stale.
     # The normal path remains bounded; this only runs when it returned no records.
-    recent = fetch_with_search(None)
+    recent = fetch_with_search("status:closed") + fetch_with_search("status:open")
     return [
         order for order in recent
         if start <= (_to_date(order.get("created_at"), report_tz=report_tz) or date.min) <= end
