@@ -458,7 +458,7 @@ def fetch_orders_by(
     end_exclusive = end + timedelta(days=1)
     search = f"status:any {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}"
     query = """
-    query CodPilotOrders($after: String, $query: String) {
+    query CodPilotOrders($after: String, $query: String!) {
       orders(first: 250, after: $after, query: $query, sortKey: UPDATED_AT) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -478,50 +478,22 @@ def fetch_orders_by(
       }
     }
     """
-    def fetch_with_search(search_query: str | None) -> list[dict[str, Any]]:
-        fetched: list[dict[str, Any]] = []
-        after: str | None = None
-        while True:
-            result = shopify_graphql(
-                shop,
-                access_token,
-                query,
-                {"after": after, "query": search_query},
-            )
-            root = ((result.get("data") or {}).get("orders") or {}) if isinstance(result, dict) else {}
-            nodes = root.get("nodes") or []
-            if not isinstance(nodes, list):
-                raise ShopifySyncError("Shopify GraphQL returned an invalid orders payload")
-            fetched.extend(_normalize_graphql_order(item) for item in nodes if isinstance(item, dict))
-            page = root.get("pageInfo") or {}
-            if not page.get("hasNextPage"):
-                break
-            after = str(page.get("endCursor") or "") or None
-            if not after:
-                break
-        return fetched
-
-    # Shopify treats completed orders as closed. Try the broad search first,
-    # then explicit open/closed searches so a fulfilled test order cannot be
-    # silently omitted by a store's search-index behaviour.
-    search_variants = [
-        search,
-        f"status:closed {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}",
-        f"status:open {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}",
-        f"{field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}",
-    ]
-    for search_variant in search_variants:
-        orders = fetch_with_search(search_variant)
-        if orders:
-            return orders
-
-    # Last-resort compatibility path for stores whose date search index is stale.
-    # The normal path remains bounded; this only runs when it returned no records.
-    recent = fetch_with_search("status:closed") + fetch_with_search("status:open")
-    return [
-        order for order in recent
-        if start <= (_to_date(order.get("created_at"), report_tz=report_tz) or date.min) <= end
-    ]
+    orders: list[dict[str, Any]] = []
+    after: str | None = None
+    while True:
+        result = shopify_graphql(shop, access_token, query, {"after": after, "query": search})
+        root = ((result.get("data") or {}).get("orders") or {}) if isinstance(result, dict) else {}
+        nodes = root.get("nodes") or []
+        if not isinstance(nodes, list):
+            raise ShopifySyncError("Shopify GraphQL returned an invalid orders payload")
+        orders.extend(_normalize_graphql_order(item) for item in nodes if isinstance(item, dict))
+        page = root.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        after = str(page.get("endCursor") or "") or None
+        if not after:
+            break
+    return orders
 
 
 def _money(node: Any) -> str:
@@ -1274,6 +1246,14 @@ def sync_shopify_range(app: Flask, start: date, end: date) -> dict[str, Any]:
             report_tz = None
 
     with app.app_context():
+        # Pushing an app context creates a fresh Flask `g`. Preserve the
+        # authenticated merchant in that context so tenant-scoped ORM writes
+        # and reads use the real shop domain instead of an empty string.
+        from flask import g
+
+        g.shopify_shop = shop
+        g.shopify_access_token = token
+
         # Main daily metrics are based on orders created in the range.
         orders = fetch_orders(shop=shop, access_token=token, start=start, end=end, report_tz=report_tz)
         aggregates = aggregate_orders_to_daily(orders, report_tz=report_tz)
