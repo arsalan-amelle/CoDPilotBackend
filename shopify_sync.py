@@ -85,6 +85,12 @@ def _get_credentials() -> tuple[str | None, str | None]:
     return None, None
 
 
+def _current_shop_domain() -> str:
+    """Return the authenticated shop used for this sync request."""
+    shop, _ = _get_credentials()
+    return _normalize_shop_domain(shop or "")
+
+
 def get_sync_days() -> int:
     try:
         return max(1, int(os.getenv("SHOPIFY_SYNC_DAYS", "10")))
@@ -155,7 +161,10 @@ def shopify_graphql(shop: str, access_token: str, query: str, variables: dict[st
 
     resp = requests.post(url, headers=headers, json=payload, timeout=60)
     if resp.status_code == 401 or resp.status_code == 403:
-        raise ShopifySyncError("Shopify auth failed for GraphQL (check token scopes)")
+        detail = resp.text[:500].replace("\n", " ").strip()
+        raise ShopifySyncError(
+            f"Shopify GraphQL authorization failed ({resp.status_code}): {detail or 'empty response'}"
+        )
     if resp.status_code >= 400:
         raise ShopifySyncError(f"Shopify GraphQL error: {resp.status_code} {resp.text[:200]}")
     data = resp.json() if resp.content else {}
@@ -449,7 +458,7 @@ def fetch_orders_by(
     end_exclusive = end + timedelta(days=1)
     search = f"status:any {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}"
     query = """
-    query CodPilotOrders($after: String, $query: String!) {
+    query CodPilotOrders($after: String, $query: String) {
       orders(first: 250, after: $after, query: $query, sortKey: UPDATED_AT) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -469,22 +478,48 @@ def fetch_orders_by(
       }
     }
     """
-    orders: list[dict[str, Any]] = []
-    after: str | None = None
-    while True:
-        result = shopify_graphql(shop, access_token, query, {"after": after, "query": search})
-        root = ((result.get("data") or {}).get("orders") or {}) if isinstance(result, dict) else {}
-        nodes = root.get("nodes") or []
-        if not isinstance(nodes, list):
-            raise ShopifySyncError("Shopify GraphQL returned an invalid orders payload")
-        orders.extend(_normalize_graphql_order(item) for item in nodes if isinstance(item, dict))
-        page = root.get("pageInfo") or {}
-        if not page.get("hasNextPage"):
-            break
-        after = str(page.get("endCursor") or "") or None
-        if not after:
-            break
-    return orders
+    def fetch_with_search(search_query: str | None) -> list[dict[str, Any]]:
+        fetched: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            result = shopify_graphql(
+                shop,
+                access_token,
+                query,
+                {"after": after, "query": search_query},
+            )
+            root = ((result.get("data") or {}).get("orders") or {}) if isinstance(result, dict) else {}
+            nodes = root.get("nodes") or []
+            if not isinstance(nodes, list):
+                raise ShopifySyncError("Shopify GraphQL returned an invalid orders payload")
+            fetched.extend(_normalize_graphql_order(item) for item in nodes if isinstance(item, dict))
+            page = root.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            after = str(page.get("endCursor") or "") or None
+            if not after:
+                break
+        return fetched
+
+    orders = fetch_with_search(search)
+    if orders:
+        return orders
+
+    # Some Shopify stores return an empty result for a compound search containing
+    # status:any even though the order exists. Retry the same bounded date query
+    # without that qualifier before falling back to a recent local date filter.
+    bounded_search = f"{field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}"
+    orders = fetch_with_search(bounded_search)
+    if orders:
+        return orders
+
+    # Last-resort compatibility path for stores whose date search index is stale.
+    # The normal path remains bounded; this only runs when it returned no records.
+    recent = fetch_with_search(None)
+    return [
+        order for order in recent
+        if start <= (_to_date(order.get("created_at"), report_tz=report_tz) or date.min) <= end
+    ]
 
 
 def _money(node: Any) -> str:
@@ -679,6 +714,7 @@ def aggregate_orders_to_daily(orders: list[dict[str, Any]], report_tz: Any | Non
 
 
 def upsert_daily_aggregates(aggregates: list[DailyAggregate]) -> None:
+    shop_domain = _current_shop_domain()
     for a in aggregates:
         existing = (
             ShopifyPricesRecord.query.filter(ShopifyPricesRecord.date == a.date)
@@ -687,7 +723,7 @@ def upsert_daily_aggregates(aggregates: list[DailyAggregate]) -> None:
         )
 
         if existing is None:
-            existing = ShopifyPricesRecord(date=a.date, currency=a.currency)
+            existing = ShopifyPricesRecord(shop_domain=shop_domain, date=a.date, currency=a.currency)
             db.session.add(existing)
 
         existing.total_count = a.total_count
@@ -876,6 +912,7 @@ def _infer_order_no(order: dict[str, Any]) -> str:
 
 
 def upsert_daily_return_details(start: date, end: date, orders: list[dict[str, Any]], report_tz: Any | None = None) -> None:
+    shop_domain = _current_shop_domain()
     # Rebuild detail rows for the range (simple + deterministic).
     (
         db.session.query(ShopifyReturnDetailRecord)
@@ -910,6 +947,7 @@ def upsert_daily_return_details(start: date, end: date, orders: list[dict[str, A
             continue
 
         rec = ShopifyReturnDetailRecord(
+            shop_domain=shop_domain,
             date=created_d,
             order_no=order_no,
             client_no=_infer_client_no(o),
@@ -928,6 +966,7 @@ def upsert_daily_product_sales(*, start: date, end: date, orders: list[dict[str,
     We exclude financially voided orders so cancelled-after-order-creation doesn't inflate quantities.
     """
 
+    shop_domain = _current_shop_domain()
     totals: dict[tuple[date, str], int] = {}
 
     for o in orders:
@@ -967,7 +1006,7 @@ def upsert_daily_product_sales(*, start: date, end: date, orders: list[dict[str,
     )
 
     for (d, title), qty in totals.items():
-        db.session.add(ShopifyProductSalesRecord(date=d, product_title=title, quantity=qty))
+        db.session.add(ShopifyProductSalesRecord(shop_domain=shop_domain, date=d, product_title=title, quantity=qty))
 
     db.session.commit()
 
@@ -979,6 +1018,7 @@ def upsert_daily_product_value(*, start: date, end: date, orders: list[dict[str,
     We exclude financially voided orders so cancelled-after-order-creation doesn't inflate totals.
     """
 
+    shop_domain = _current_shop_domain()
     totals: dict[tuple[date, str], Decimal] = {}
 
     for o in orders:
@@ -1035,7 +1075,7 @@ def upsert_daily_product_value(*, start: date, end: date, orders: list[dict[str,
             amt = amt.quantize(Decimal("0.01"))
         except Exception:
             pass
-        db.session.add(ShopifyProductValueRecord(date=d, product_title=title, amount=amt))
+        db.session.add(ShopifyProductValueRecord(shop_domain=shop_domain, date=d, product_title=title, amount=amt))
 
     db.session.commit()
 
@@ -1043,6 +1083,7 @@ def upsert_daily_product_value(*, start: date, end: date, orders: list[dict[str,
 def upsert_daily_product_cities(*, start: date, end: date, orders: list[dict[str, Any]], report_tz: Any | None = None) -> None:
     """Rebuild per-day product unit totals by destination city."""
 
+    shop_domain = _current_shop_domain()
     totals: dict[tuple[date, str, str], int] = {}
 
     for o in orders:
@@ -1078,7 +1119,7 @@ def upsert_daily_product_cities(*, start: date, end: date, orders: list[dict[str
         .delete(synchronize_session=False)
     )
     for (d, title, city), quantity in totals.items():
-        db.session.add(ShopifyProductCityRecord(date=d, product_title=title, city=city, quantity=quantity))
+        db.session.add(ShopifyProductCityRecord(shop_domain=shop_domain, date=d, product_title=title, city=city, quantity=quantity))
     db.session.commit()
 
 
@@ -1089,6 +1130,7 @@ def upsert_daily_city_sales(*, start: date, end: date, orders: list[dict[str, An
     We exclude voided and cancelled orders to stay consistent with other aggregates.
     """
 
+    shop_domain = _current_shop_domain()
     totals: dict[tuple[date, str], int] = {}
 
     for o in orders:
@@ -1122,7 +1164,7 @@ def upsert_daily_city_sales(*, start: date, end: date, orders: list[dict[str, An
     )
 
     for (d, city), n in totals.items():
-        db.session.add(ShopifyCitySalesRecord(date=d, city=city, orders=n))
+        db.session.add(ShopifyCitySalesRecord(shop_domain=shop_domain, date=d, city=city, orders=n))
 
     db.session.commit()
 
