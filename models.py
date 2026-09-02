@@ -9,10 +9,34 @@ from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy()
 
 
+
+
+def _request_shop_domain() -> str:
+    try:
+        from flask import g
+        return str(getattr(g, "shopify_shop", "") or "").strip().lower()
+    except RuntimeError:
+        return ""
+
+def _request_shop_domain() -> str:
+    """Default tenant for records created during an authenticated request."""
+    try:
+        from flask import g
+
+        return str(getattr(g, "shopify_shop", "") or "").strip().lower()
+    except RuntimeError:
+        return ""
+
+
 class TenantMixin:
     """Adds mandatory per-Shopify-store isolation to analytics records."""
 
-    shop_domain = db.Column(db.String(255), nullable=False, index=True)
+    shop_domain = db.Column(
+        db.String(255),
+        nullable=False,
+        index=True,
+        default=_request_shop_domain,
+    )
 
 
 class ShopifyPricesRecord(TenantMixin, db.Model):
