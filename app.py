@@ -22,7 +22,7 @@ from flask import Flask, abort, g, jsonify, request
 from flask_cors import CORS
 from flask_migrate import Migrate
 from sqlalchemy import event, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, with_loader_criteria
 from werkzeug.security import check_password_hash, generate_password_hash
 import requests
@@ -537,7 +537,16 @@ def create_app() -> Flask:
                 except ShopifySyncError as exc:
                     app.logger.exception("Shopify sync failed for %s to %s", req_start, req_end)
                     return jsonify({"records": [], "error": str(exc)}), 502
+                except IntegrityError as exc:
+                    db.session.rollback()
+                    detail = str(getattr(exc, "orig", None) or exc).replace("\n", " ").strip()[:500]
+                    app.logger.exception("Shopify sync database integrity error for %s to %s", req_start, req_end)
+                    return jsonify({
+                        "records": [],
+                        "error": f"Sync database integrity error: {detail}",
+                    }), 500
                 except Exception as exc:
+                    db.session.rollback()
                     app.logger.exception("Unexpected Shopify sync failure for %s to %s", req_start, req_end)
                     return jsonify({"records": [], "error": f"Sync failed: {type(exc).__name__}"}), 500
 
