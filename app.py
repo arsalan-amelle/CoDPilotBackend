@@ -523,6 +523,7 @@ def create_app() -> Flask:
         start = _parse_date(request.args.get("start"))
         end = _parse_date(request.args.get("end"))
         refresh = request.args.get("refresh") in ("1", "true", "yes")
+        sync_summary = None
 
         if refresh and can_sync_shopify() and start and end:
             # Refresh exactly the date range selected in the dashboard.
@@ -532,13 +533,13 @@ def create_app() -> Flask:
 
             if req_start <= req_end:
                 try:
-                    sync_shopify_range(app, start=req_start, end=req_end)
-                except ShopifySyncError:
-                    # Ignore sync errors here; UI will still show DB contents.
-                    pass
-                except Exception:
-                    # Defensive: don't 500 the dashboard if an unexpected error occurs during sync.
-                    pass
+                    sync_summary = sync_shopify_range(app, start=req_start, end=req_end)
+                except ShopifySyncError as exc:
+                    app.logger.exception("Shopify sync failed for %s to %s", req_start, req_end)
+                    return jsonify({"records": [], "error": str(exc)}), 502
+                except Exception as exc:
+                    app.logger.exception("Unexpected Shopify sync failure for %s to %s", req_start, req_end)
+                    return jsonify({"records": [], "error": f"Sync failed: {type(exc).__name__}"}), 500
 
         try:
             q = ShopifyPricesRecord.query
@@ -550,7 +551,7 @@ def create_app() -> Flask:
         except OperationalError:
             return jsonify({"records": []})
 
-        return jsonify({"records": [serialize_daily_record(r) for r in rows]})
+        return jsonify({"records": [serialize_daily_record(r) for r in rows], "sync": sync_summary})
 
     @app.get("/api/return-details")
     def get_return_details():
