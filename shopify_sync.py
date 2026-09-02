@@ -443,7 +443,11 @@ def fetch_orders_by(
     # keeps its existing calculation code by normalizing the GraphQL response
     # into the legacy internal order shape at this boundary.
     field = "created_at" if date_filter == "created_at" else "updated_at"
-    search = f"status:any {field}:>={start.isoformat()} {field}:<={end.isoformat()}"
+    # Shopify interprets a date-only upper bound as midnight at the start of
+    # that date. Use an exclusive next-day bound so the entire selected end
+    # date is included.
+    end_exclusive = end + timedelta(days=1)
+    search = f"status:any {field}:>={start.isoformat()} {field}:<{end_exclusive.isoformat()}"
     query = """
     query CodPilotOrders($after: String, $query: String!) {
       orders(first: 250, after: $after, query: $query, sortKey: UPDATED_AT) {
