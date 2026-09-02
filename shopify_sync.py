@@ -463,7 +463,7 @@ def fetch_orders_by(
           customer { id numberOfOrders }
           shippingLines(first: 100) { nodes { title } }
           lineItems(first: 250) { nodes { title quantity originalUnitPriceSet { shopMoney { amount } } } }
-          fulfillments(first: 100) { nodes { status createdAt updatedAt trackingInfo(first: 10) { company } } }
+          fulfillments(first: 100) { status createdAt updatedAt trackingInfo(first: 10) { company } }
           refunds { createdAt transactions(first: 100) { nodes { kind status amountSet { shopMoney { amount } } } } }
         }
       }
